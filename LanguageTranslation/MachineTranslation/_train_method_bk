@@ -1,0 +1,169 @@
+template<class T>
+bool RNN<T>::_train(T *W_1, size_t b_1, T *W_2, size_t b_2, size_t n_data_points)
+{
+    T* H_IN;
+    T* D_OUT;
+    T* DELTA;
+    size_t l_1;
+    size_t FSE = source_hash["SEN-END"]; //TODO //11
+    size_t SSE = DEST_END; //TODO //9
+
+    int prev_index = -1;
+    int *_null = NULL;
+
+    if(handle == NULL) {
+        H_IN  = (T*)this->pool->allocateMemory(sizeof(T)*(b_1+b_2+1)*N_H);
+        D_OUT = (T*)this->pool->allocateMemory(sizeof(T)*(b_1+b_2)*N_H);
+        DELTA = (T*)this->pool->allocateMemory(sizeof(T)*N_H);
+        if(H_IN && D_OUT && DELTA) {
+            memset(H_IN,0,sizeof(T)*(b_1+b_2)*N_H);
+            memset(D_OUT,0,sizeof(T)*(b_1+b_2)*N_H);
+            memset(DELTA,0,sizeof(T)*N_H);
+            // NEED TO INITIALIZE TO ZERO EVEN IF THEY ARE RE-WRITTEN IN FUNCTION CALL
+
+        } else {
+            return false;
+        }
+    } else {
+        CUDA_SAFE_CALL(cudaMalloc((void **)&H_IN,sizeof(T)*(b_1+b_2+1)*N_H));
+        CUDA_SAFE_CALL(cudaMalloc((void **)&D_OUT,sizeof(T)*(b_1+b_2)*N_H));
+        CUDA_SAFE_CALL(cudaMalloc((void **)&DELTA,sizeof(T)*N_H));
+        // NO NEED TO INITIALIZE TO ZERO SINCE THEY ARE RE-WRITTEN IN FUNCTION CALL
+    }
+
+    for(int n = 0; n<n_data_points; n++) {
+
+        int i = 0, j = 0;
+        for(;i<b_1;i++) {
+            if(PRINT) PRINTMATRIX("\nSentence Number ",&n,1,1,NULL,this->dumpfile);
+
+            int index = W_1[n*b_1+i]-START_INDEX_IN_FILE;
+            if(PRINT) PRINTMATRIX("\nWord ",&index,1,1,NULL,this->dumpfile);
+            if (index >= 0 && index != FSE) {
+                cell->stepForward(&H_IN[i*N_H],&W_XS[N_X*index],&H_IN[(i+1)*N_H],&D_OUT[i*N_H]);
+                soft_max->activate(&H_IN[(i+1)*N_H]);
+                int _index = W_1[n*b_1+(i+1)]-START_INDEX_IN_FILE;
+                soft_max->setError(_index);
+                soft_max->accumulateGradient(&H_IN[(i+1)*N_H]);
+                soft_max->propagateDeltaBack(DELTA);
+
+                for(int p = i; (p >= 0 && p >= i-1) ; p--) {
+                    int idx = W_1[n*b_1+p]-START_INDEX_IN_FILE;
+                    if(PRINT) PRINTMATRIX("\nWord ",&idx,1,1,NULL,this->dumpfile);
+                    cell->accumulateGradient(&H_IN[p*N_H],&W_XS[N_X*idx],&D_OUT[p*N_H],DELTA);
+                    cell->propagateDeltaBack(DELTA);
+                }
+                cell->updateCell();
+                soft_max->updateCell();
+
+            } else {
+                break;
+            }
+        }
+
+
+        l_1 = i; // INDEX OF SENTENCE_END IN DATA
+        prev_index = FSE;
+        if(PRINT) PRINTMATRIX("\nWord ",&prev_index,1,1,NULL,this->dumpfile);
+        cell->stepForward(&H_IN[i*N_H],&W_XS[N_X*prev_index],&H_IN[(i+1)*N_H],&D_OUT[i*N_H]);
+        soft_max->activate(&H_IN[(i+1)*N_H]);
+        int _index = W_2[n*b_2+j]-START_INDEX_IN_FILE;
+        if(_index >= 0 && _index != SSE) {
+            soft_max->setError(_index);
+            soft_max->accumulateGradient(&H_IN[(i+1)*N_H]);
+            soft_max->propagateDeltaBack(DELTA);
+
+            cell->accumulateGradient(&H_IN[i*N_H],&W_XS[N_X*prev_index],&D_OUT[i*N_H],DELTA);
+            cell->propagateDeltaBack(DELTA);
+            prev_index = _index;
+            for(int p = i-1; (p >= 0 && p>=i-1) ; p--) {
+                int index = W_1[n*b_1+p]-START_INDEX_IN_FILE;
+                if(PRINT) PRINTMATRIX("\nWord ",&index,1,1,NULL,this->dumpfile);
+                cell->accumulateGradient(&H_IN[p*N_H],&W_XS[N_X*index],&D_OUT[p*N_H],DELTA);
+                cell->propagateDeltaBack(DELTA);
+
+
+            }
+            cell->updateCell();
+            soft_max->updateCell();
+            j++; // J should be 1 now
+        }
+
+        for(int k = 0;j<b_2;j++,k++) {
+            if(PRINT) PRINTMATRIX("\nSentence Number ",&n,1,1,NULL,this->dumpfile);
+            if(PRINT) PRINTMATRIX("\nword ",_null,0,0,NULL,this->dumpfile);
+            if(PRINT) PRINTMATRIX(dest_vocab.at(prev_index).c_str(),_null,0,0,NULL,this->dumpfile);
+            int index = W_2[n*b_2+j]-START_INDEX_IN_FILE;
+            if (index >= 0) {
+                if(j == 1) { //or k == 0
+                    cell->stepForward(&H_IN[(l_1+1)*N_H],&W_XD[N_X*prev_index],&H_IN[(b_1+k+1)*N_H],&D_OUT[(b_1+k)*N_H]);
+                } else {
+                    cell->stepForward(&H_IN[(b_1+k)*N_H],&W_XD[N_X*prev_index],&H_IN[(b_1+k+1)*N_H],&D_OUT[(b_1+k)*N_H]);
+                }
+                //cell->stepForward(&H_IN[i*N_H],&W_XD[N_X*prev_index],&H_IN[(b_1+j)*N_H],&D_OUT[(b_1+j)*N_H]);
+
+
+                soft_max->activate(&H_IN[(b_1+k+1)*N_H]);
+                soft_max->setError(index);
+                soft_max->accumulateGradient(&H_IN[(b_1+k+1)*N_H]);
+                soft_max->propagateDeltaBack(DELTA);
+
+                int p = k+b_1;
+                int q = k; // this is j-1
+
+                while(p >= b_1 && ((k+b_1)-p)<=1) {
+                    if(p == b_1) {
+                        size_t index = W_2[n*b_2+q]-START_INDEX_IN_FILE;
+                        if(PRINT) PRINTMATRIX("\nword ",_null,0,0,NULL,this->dumpfile);
+                        if(PRINT) PRINTMATRIX(dest_vocab.at(index).c_str(),_null,0,0,NULL,this->dumpfile);
+                        cell->accumulateGradient(&H_IN[(l_1+1)*N_H],&W_XD[N_X*index],&D_OUT[p*N_H],DELTA);
+                        cell->propagateDeltaBack(DELTA);
+                    } else {
+                        size_t index = W_2[n*b_2+q]-START_INDEX_IN_FILE;
+                        if(PRINT) PRINTMATRIX("\nword ",_null,0,0,NULL,this->dumpfile);
+                        if(PRINT) PRINTMATRIX(dest_vocab.at(index).c_str(),_null,0,0,NULL,this->dumpfile);
+                        cell->accumulateGradient(&H_IN[p*N_H],&W_XD[N_X*index],&D_OUT[p*N_H],DELTA);
+                        cell->propagateDeltaBack(DELTA);
+                    }
+                    p--;
+                    q--;
+                }
+
+                if(p == b_1-1) {
+                    for(int r = l_1;(r>=0 && ((k+b_1)-p)<=1) ;r--,p--) {
+                        size_t index = W_1[n*b_1+r]-START_INDEX_IN_FILE;
+                        if(PRINT) PRINTMATRIX("\nword ",_null,0,0,NULL,this->dumpfile);
+                        if(PRINT) PRINTMATRIX(dest_vocab.at(index).c_str(),_null,0,0,NULL,this->dumpfile);
+                        cell->accumulateGradient(&H_IN[r*N_H],&W_XS[N_X*index],&D_OUT[r*N_H],DELTA);
+                        cell->propagateDeltaBack(DELTA);
+
+
+                    }
+
+                }
+
+                cell->updateCell();
+                soft_max->updateCell();
+
+                prev_index = index;
+
+            } else {
+                break;
+            }
+        }
+        //cell->updateCell();
+        //soft_max->updateCell();
+    }
+
+    if(handle == NULL) {
+        this->pool->freeMemory(H_IN,sizeof(T)*(b_1+b_2+1)*N_H);
+        this->pool->freeMemory(D_OUT,sizeof(T)*(b_1+b_2)*N_H);
+        this->pool->freeMemory(DELTA,sizeof(T)*N_H);
+    } else {
+        CUDA_SAFE_CALL(cudaFree(H_IN));
+        CUDA_SAFE_CALL(cudaFree(D_OUT));
+        CUDA_SAFE_CALL(cudaFree(DELTA));
+    }
+    return true;
+}
+
